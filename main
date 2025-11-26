@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>easydotmaker</title>
+<style>
+  body {
+    margin: 0;
+    display: flex;
+    height: 100vh;
+    font-family: sans-serif;
+  }
+  #left-panel {
+    width: 25%;
+    background: #f0f0f0;
+    padding: 10px;
+    box-sizing: border-box;
+    overflow-y: auto;
+  }
+  #right-panel {
+    flex: 1;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    background: #fff;
+  }
+  #palette {
+    display: grid;
+    grid-template-columns: repeat(8, 20px);
+    gap: 4px;
+    margin-top: 10px;
+  }
+  .palette-color {
+    width: 20px;
+    height: 20px;
+    border: 1px solid #ccc;
+    cursor: pointer;
+  }
+  #dot-canvas {
+    image-rendering: pixelated;
+    border: 1px solid #444;
+    background: white;
+  }
+</style>
+</head>
+<body>
+<div id="left-panel">
+  <h3>カラーサークル</h3>
+  <input type="color" id="color-picker" />
+  <button id="save-color">選択色をパレットへ</button>
+  <button id="eyedropper">スポイト</button>
+  <h3>パレット</h3>
+  <div id="palette"></div>
+  <h3>倍率</h3>
+  <button id="zoom-in">＋</button>
+  <button id="zoom-out">−</button>
+  <h3>罫線太線間隔</h3>
+  <input type="number" id="grid-interval" value="8" min="1" />
+  <h3>出力</h3>
+  <button id="export-png">PNG出力</button>
+</div>
+<div id="right-panel">
+  <canvas id="dot-canvas" width="256" height="256"></canvas>
+</div>
+<script>
+// --- State ---
+const size = 32;
+let scale = 16;
+let currentColor = '#000000';
+let eyedrop = false;
+const data = Array(size).fill().map(()=>Array(size).fill('rgba(0,0,0,0)'));
+const paletteEl = document.getElementById('palette');
+let palette = Array(64).fill('rgba(0,0,0,0)');
+
+// --- Canvas ---
+const canvas = document.getElementById('dot-canvas');
+const ctx = canvas.getContext('2d');
+
+function draw(){
+  canvas.width = size * scale;
+  canvas.height = size * scale;
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  for(let y=0;y<size;y++){
+    for(let x=0;x<size;x++){
+      ctx.fillStyle = data[y][x];
+      ctx.fillRect(x*scale,y*scale,scale,scale);
+    }
+  }
+  // grid
+  ctx.strokeStyle = '#ccc';
+  for(let i=0;i<=size;i++){
+    ctx.beginPath();
+    ctx.moveTo(i*scale, 0);
+    ctx.lineTo(i*scale, size*scale);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(0, i*scale);
+    ctx.lineTo(size*scale, i*scale);
+    ctx.stroke();
+  }
+  const interval = parseInt(document.getElementById('grid-interval').value,10);
+  ctx.strokeStyle = '#000';
+  for(let i=0;i<=size;i+=interval){
+    ctx.lineWidth = 2;
+    ctx.beginPath();ctx.moveTo(i*scale,0);ctx.lineTo(i*scale,size*scale);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(0,i*scale);ctx.lineTo(size*scale,i*scale);ctx.stroke();
+    ctx.lineWidth = 1;
+  }
+}
+
+draw();
+
+// --- Palette ---
+function renderPalette(){
+  paletteEl.innerHTML='';
+  palette.forEach((c,i)=>{
+    const d=document.createElement('div');
+    d.className='palette-color';
+    d.style.background=c;
+    d.onclick=()=>{ currentColor=c; };
+    paletteEl.appendChild(d);
+  });
+}
+renderPalette();
+
+document.getElementById('save-color').onclick=()=>{
+  const idx = palette.findIndex(c=>c==='rgba(0,0,0,0)');
+  if(idx>=0) palette[idx] = currentColor;
+  else palette[palette.length-1] = currentColor;
+  renderPalette();
+};
+
+document.getElementById('color-picker').oninput=e=>{
+  currentColor = e.target.value;
+};
+
+document.getElementById('eyedropper').onclick=()=>{
+  eyedrop = !eyedrop;
+};
+
+// --- Zoom ---
+document.getElementById('zoom-in').onclick=()=>{ scale = Math.min(scale+2, 64); draw(); };
+document.getElementById('zoom-out').onclick=()=>{ scale = Math.max(scale-2, 2); draw(); };
+
+// --- Canvas interaction ---
+canvas.addEventListener('mousedown', e=>{
+  const rect = canvas.getBoundingClientRect();
+  const x = Math.floor((e.clientX - rect.left)/scale);
+  const y = Math.floor((e.clientY - rect.top)/scale);
+  if(x<0||y<0||x>=size||y>=size) return;
+  if(eyedrop){ currentColor = data[y][x]; eyedrop=false; return; }
+  data[y][x] = currentColor;
+  draw();
+});
+
+// --- Export PNG ---
+document.getElementById('export-png').onclick=()=>{
+  const out = document.createElement('canvas');
+  out.width = size;
+  out.height = size;
+  const octx = out.getContext('2d');
+  for(let y=0;y<size;y++){
+    for(let x=0;x<size;x++){
+      octx.fillStyle = data[y][x];
+      octx.fillRect(x,y,1,1);
+    }
+  }
+  const link = document.createElement('a');
+  link.download = 'dot.png';
+  link.href = out.toDataURL();
+  link.click();
+};
+</script>
+</body>
+</html>
