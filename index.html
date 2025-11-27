@@ -9,15 +9,19 @@
   #left-panel { width: 25%; background: #f0f0f0; padding: 10px; box-sizing: border-box; overflow-y: auto; }
   #right-panel { flex: 1; display: flex; justify-content: center; align-items: center; background: #fff; }
   #palette { display: grid; grid-template-columns: repeat(8, 20px); gap: 4px; margin-top: 10px; }
-  .palette-color { width: 20px; height: 20px; border: 1px solid #ccc; cursor: pointer; }
+  .palette-color { width: 20px; height: 20px; border: 1px solid #ccc; cursor: pointer; box-sizing: border-box; }
   #dot-canvas { image-rendering: pixelated; border: 1px solid #444; background: transparent; }
-  .tool-btn { margin: 2px 0; display:block; }
+  .tool-btn { margin: 2px 0; display:inline-block; }
+  #current-color-preview { width: 40px; height: 20px; border: 1px solid #aaa; display: inline-block; vertical-align: middle; margin-left: 6px; background: #000; }
 </style>
 </head>
 <body>
 <div id="left-panel">
-  <h3>カラーサークル（HSV）</h3>
-  <input type="color" id="color-picker" />
+  <h3>カラーサークル（円形）</h3>
+  <canvas id="color-wheel" width="150" height="150" style="cursor:pointer;border:1px solid #ccc;border-radius:50%;display:block;"></canvas>
+  明度: <input type="range" id="value-slider" min="0" max="100" value="100" style="width:150px;" />
+  <div style="margin-top:4px;">現在の色: <span id="current-color-preview"></span></div>
+  <br/>
   <button class="tool-btn" id="save-color">選択色をパレットへ</button>
   <button class="tool-btn" id="eyedropper">スポイト</button>
 
@@ -25,21 +29,26 @@
   <div id="palette"></div>
 
   <h3>描画ツール</h3>
-  <button class="tool-btn" id="tool-pencil">ペン</button>
-  <button class="tool-btn" id="tool-rectsel">矩形選択</button>
-  <button class="tool-btn" id="tool-lasso">投げ縄選択</button>
-  <button class="tool-btn" id="tool-fill">塗りつぶし</button>
-  <button class="tool-btn" id="tool-move">移動</button>
-  <button class="tool-btn" id="tool-bright+">明るく</button>
-  <button class="tool-btn" id="tool-bright-">暗く</button>
+  <div>
+    <button class="tool-btn" id="tool-pencil">ペン</button>
+    <button class="tool-btn" id="tool-rectsel">矩形選択</button>
+    <button class="tool-btn" id="tool-lasso">投げ縄選択</button>
+    <button class="tool-btn" id="tool-fill">塗りつぶし</button>
+    <button class="tool-btn" id="tool-move">移動</button>
+    <button class="tool-btn" id="tool-bright+">明るく</button>
+    <button class="tool-btn" id="tool-bright-">暗く</button>
+  </div>
 
   <h3>キャンバスサイズ</h3>
-  <input type="number" id="canvas-size" value="32" min="4" max="256" />
+  幅: <input type="number" id="canvas-width" value="32" min="4" max="256" style="width:60px;" />
+  高さ: <input type="number" id="canvas-height" value="32" min="4" max="256" style="width:60px;" />
   <button class="tool-btn" id="resize-canvas">変更</button>
 
   <h3>倍率</h3>
-  <button class="tool-btn" id="zoom-in">＋</button>
-  <button class="tool-btn" id="zoom-out">−</button>
+  <div style="display:flex;gap:6px;">
+    <button class="tool-btn" id="zoom-in">＋</button>
+    <button class="tool-btn" id="zoom-out">−</button>
+  </div>
 
   <h3>罫線太線間隔</h3>
   <input type="number" id="grid-interval" value="8" min="1" />
@@ -53,235 +62,569 @@
 </div>
 
 <script>
-// ====== 基本状態 ======
-let size = 32;
+// ====== ユーティリティ ======
+const TRANSPARENT = 'rgba(0,0,0,0)';
+
+function createEmpty(width, height) {
+  const arr = new Array(height);
+  for (let y = 0; y < height; y++) {
+    arr[y] = new Array(width).fill(TRANSPARENT);
+  }
+  return arr;
+}
+
+function cloneData(d) {
+  return d.map(row => row.slice());
+}
+
+function rgbaString(r, g, b, a = 1) {
+  return `rgba(${r},${g},${b},${a})`;
+}
+
+function parseRgba(str) {
+  if (!str.startsWith('rgba(')) return { r: 0, g: 0, b: 0, a: 0 };
+  const nums = str.replace('rgba(', '').replace(')', '').split(',').map(Number);
+  return { r: nums[0], g: nums[1], b: nums[2], a: nums[3] };
+}
+
+function hsvToRgb(h, s, v) {
+  let f = (n, k = (n + h / 60) % 6) => v - v * s * Math.max(Math.min(k, 4 - k, 1), 0);
+  return {
+    r: Math.round(f(5) * 255),
+    g: Math.round(f(3) * 255),
+    b: Math.round(f(1) * 255)
+  };
+}
+
+function rgbToHsv(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  let max = Math.max(r, g, b), min = Math.min(r, g, b);
+  let h, s, v = max;
+  let d = max - min;
+  s = max == 0 ? 0 : d / max;
+  if (max == min) {
+    h = 0;
+  } else {
+    switch (max) {
+      case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+      case g: h = (b - r) / d + 2; break;
+      case b: h = (r - g) / d + 4; break;
+    }
+    h *= 60;
+  }
+  return { h, s, v };
+}
+
+function createMask(width, height, value = false) {
+  const m = new Array(height);
+  for (let y = 0; y < height; y++) {
+    m[y] = new Array(width).fill(value);
+  }
+  return m;
+}
+
+// ====== 状態 ======
+let canvasWidth = 32;
+let canvasHeight = 32;
 let scale = 16;
-let currentColor = '#000000';
-let eyedrop = false;
+let data = createEmpty(canvasWidth, canvasHeight);
+
+let currentHue = 0;
+let currentSat = 0;
+let currentVal = 1;
+let currentColor = rgbaString(0, 0, 0, 1);
+
 let tool = 'pencil';
+let eyedrop = false;
 let selectionMask = null;
 let lassoPoints = [];
-let isDragging = false;
-let dragStart = null;
+let isMouseDown = false;
+let isLassoDrawing = false;
+let isDraggingSelection = false;
+let dragStartGrid = null;
+let baseData = null;
+let selectionPixels = null;
 
-// データ: 透明は rgba(0,0,0,0)
-let data = createEmpty(size);
-
-function createEmpty(n){ return Array(n).fill().map(()=>Array(n).fill('rgba(0,0,0,0)')); }
-
-// ====== Canvas ======
+// ====== DOM 取得 ======
 const canvas = document.getElementById('dot-canvas');
 const ctx = canvas.getContext('2d');
 
-function draw(){
-  canvas.width = size * scale;
-  canvas.height = size * scale;
-  ctx.clearRect(0,0,canvas.width,canvas.height);
+const colorWheel = document.getElementById('color-wheel');
+const wctx = colorWheel.getContext('2d');
+const valueSlider = document.getElementById('value-slider');
+const currentColorPreview = document.getElementById('current-color-preview');
 
-  // Draw pixels
-  for(let y=0;y<size;y++){
-    for(let x=0;x<size;x++){
-      ctx.fillStyle = data[y][x];
-      ctx.fillRect(x*scale,y*scale,scale,scale);
-    }
-  }
+const paletteEl = document.getElementById('palette');
 
-  // Selection mask preview
-  if(selectionMask){
-    ctx.fillStyle = 'rgba(0,128,255,0.3)';
-    for(let y=0;y<size;y++){
-      for(let x=0;x<size;x++){
-        if(selectionMask[y][x]) ctx.fillRect(x*scale,y*scale,scale,scale);
+// ====== カラーホイール描画 ======
+function drawColorWheel() {
+  const r = colorWheel.width / 2;
+  const img = wctx.createImageData(colorWheel.width, colorWheel.height);
+  for (let y = 0; y < colorWheel.height; y++) {
+    for (let x = 0; x < colorWheel.width; x++) {
+      const dx = x - r;
+      const dy = y - r;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const idx = (y * colorWheel.width + x) * 4;
+      if (dist <= r) {
+        let angle = Math.atan2(dy, dx) * 180 / Math.PI;
+        if (angle < 0) angle += 360;
+        const sat = dist / r;
+        const c = hsvToRgb(angle, sat, 1);
+        img.data[idx] = c.r;
+        img.data[idx + 1] = c.g;
+        img.data[idx + 2] = c.b;
+        img.data[idx + 3] = 255;
+      } else {
+        img.data[idx + 3] = 0;
       }
     }
   }
-
-  // Grid
-  ctx.strokeStyle = '#ccc';
-  for(let i=0;i<=size;i++){
-    ctx.beginPath(); ctx.moveTo(i*scale,0); ctx.lineTo(i*scale,size*scale); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(0,i*scale); ctx.lineTo(size*scale,i*scale); ctx.stroke();
-  }
-  const interval = parseInt(document.getElementById('grid-interval').value,10);
-  ctx.strokeStyle = '#000';
-  for(let i=0;i<=size;i+=interval){
-    ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.moveTo(i*scale,0); ctx.lineTo(i*scale,size*scale); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(0,i*scale); ctx.lineTo(size*scale,i*scale); ctx.stroke();
-    ctx.lineWidth = 1;
-  }
+  wctx.putImageData(img, 0, 0);
 }
-draw();
+
+drawColorWheel();
+
+function updateCurrentColorFromHSV() {
+  const rgb = hsvToRgb(currentHue, currentSat, currentVal);
+  currentColor = rgbaString(rgb.r, rgb.g, rgb.b, 1);
+  currentColorPreview.style.background = currentColor;
+}
+
+colorWheel.addEventListener('click', e => {
+  const rect = colorWheel.getBoundingClientRect();
+  const x = Math.floor(e.clientX - rect.left);
+  const y = Math.floor(e.clientY - rect.top);
+  const p = wctx.getImageData(x, y, 1, 1).data;
+  if (p[3] === 0) return; // outside circle
+  const hsv = rgbToHsv(p[0], p[1], p[2]);
+  currentHue = hsv.h;
+  currentSat = hsv.s;
+  currentVal = valueSlider.value / 100;
+  updateCurrentColorFromHSV();
+});
+
+valueSlider.addEventListener('input', () => {
+  currentVal = valueSlider.value / 100;
+  updateCurrentColorFromHSV();
+});
 
 // ====== パレット ======
-const paletteEl = document.getElementById('palette');
-let palette = Array(64).fill('rgba(0,0,0,0)');
+let palette = new Array(64).fill(TRANSPARENT);
 
-function renderPalette(){
-  paletteEl.innerHTML='';
-  palette.forEach(c=>{
-    const d=document.createElement('div');
-    d.className='palette-color'; d.style.background=c;
-    d.onclick=()=> currentColor=c;
+function renderPalette() {
+  paletteEl.innerHTML = '';
+  palette.forEach((c, i) => {
+    const d = document.createElement('div');
+    d.className = 'palette-color';
+    d.style.background = (c === TRANSPARENT ? 'transparent' : c);
+    d.title = (c === TRANSPARENT ? '透明 (右クリックでクリア)' : c);
+
+    d.onclick = () => {
+      currentColor = c;
+      const { r, g, b, a } = parseRgba(c);
+      if (a > 0) {
+        const hsv = rgbToHsv(r, g, b);
+        currentHue = hsv.h;
+        currentSat = hsv.s;
+        currentVal = hsv.v;
+        valueSlider.value = Math.round(currentVal * 100);
+      }
+      currentColorPreview.style.background = c;
+    };
+
+    d.oncontextmenu = (ev) => {
+      ev.preventDefault();
+      palette[i] = TRANSPARENT;
+      renderPalette();
+    };
+
+    d.draggable = true;
+    d.ondragstart = (ev) => {
+      ev.dataTransfer.setData('idx', i.toString());
+    };
+    d.ondragover = (ev) => {
+      ev.preventDefault();
+    };
+    d.ondrop = (ev) => {
+      ev.preventDefault();
+      const from = parseInt(ev.dataTransfer.getData('idx'));
+      if (isNaN(from)) return;
+      const tmp = palette[from];
+      palette[from] = palette[i];
+      palette[i] = tmp;
+      renderPalette();
+    };
+
     paletteEl.appendChild(d);
   });
 }
+
 renderPalette();
 
-document.getElementById('save-color').onclick=()=>{
-  const i=palette.findIndex(c=>c==='rgba(0,0,0,0)');
-  palette[i>=0?i:palette.length-1]=currentColor;
+// パレットへ現在色を保存
+const saveColorBtn = document.getElementById('save-color');
+saveColorBtn.addEventListener('click', () => {
+  let idx = palette.findIndex(c => c === TRANSPARENT);
+  if (idx === -1) idx = palette.length - 1;
+  palette[idx] = currentColor;
   renderPalette();
-};
+});
+
+// スポイト
+const eyedropBtn = document.getElementById('eyedropper');
+eyedropBtn.addEventListener('click', () => {
+  eyedrop = !eyedrop;
+  eyedropBtn.style.fontWeight = eyedrop ? 'bold' : 'normal';
+});
+
+// ====== 描画 ======
+function draw() {
+  canvas.width = canvasWidth * scale;
+  canvas.height = canvasHeight * scale;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // ピクセル描画
+  for (let y = 0; y < canvasHeight; y++) {
+    for (let x = 0; x < canvasWidth; x++) {
+      const col = data[y][x];
+      if (col === TRANSPARENT) continue;
+      ctx.fillStyle = col;
+      ctx.fillRect(x * scale, y * scale, scale, scale);
+    }
+  }
+
+  // 選択領域のプレビュー
+  if (selectionMask) {
+    ctx.fillStyle = 'rgba(0,128,255,0.3)';
+    for (let y = 0; y < canvasHeight; y++) {
+      for (let x = 0; x < canvasWidth; x++) {
+        if (selectionMask[y][x]) {
+          ctx.fillRect(x * scale, y * scale, scale, scale);
+        }
+      }
+    }
+  }
+
+  // グリッド
+  const interval = parseInt(document.getElementById('grid-interval').value, 10) || 1;
+  ctx.strokeStyle = '#ccc';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= canvasWidth; i++) {
+    ctx.beginPath();
+    ctx.moveTo(i * scale, 0);
+    ctx.lineTo(i * scale, canvasHeight * scale);
+    ctx.stroke();
+  }
+  for (let i = 0; i <= canvasHeight; i++) {
+    ctx.beginPath();
+    ctx.moveTo(0, i * scale);
+    ctx.lineTo(canvasWidth * scale, i * scale);
+    ctx.stroke();
+  }
+
+  ctx.strokeStyle = '#000';
+  ctx.lineWidth = 2;
+  for (let i = 0; i <= canvasWidth; i += interval) {
+    ctx.beginPath();
+    ctx.moveTo(i * scale, 0);
+    ctx.lineTo(i * scale, canvasHeight * scale);
+    ctx.stroke();
+  }
+  for (let i = 0; i <= canvasHeight; i += interval) {
+    ctx.beginPath();
+    ctx.moveTo(0, i * scale);
+    ctx.lineTo(canvasWidth * scale, i * scale);
+    ctx.stroke();
+  }
+  ctx.lineWidth = 1;
+}
+
+draw();
+
+// グリッド入力変更時
+const gridIntervalInput = document.getElementById('grid-interval');
+gridIntervalInput.addEventListener('input', draw);
 
 // ====== ツール切替 ======
-function setTool(t){ tool=t; lassoPoints=[]; selectionMask=null; draw(); }
+function setTool(t) {
+  tool = t;
+  lassoPoints = [];
+  isLassoDrawing = false;
+  if (t !== 'move') {
+    isDraggingSelection = false;
+  }
+}
 
-document.getElementById('tool-pencil').onclick=()=>setTool('pencil');
-document.getElementById('tool-rectsel').onclick=()=>setTool('rectsel');
-document.getElementById('tool-lasso').onclick=()=>setTool('lasso');
-document.getElementById('tool-fill').onclick=()=>setTool('fill');
-document.getElementById('tool-move').onclick=()=>setTool('move');
+document.getElementById('tool-pencil').onclick = () => setTool('pencil');
+document.getElementById('tool-rectsel').onclick = () => setTool('rectsel');
+document.getElementById('tool-lasso').onclick = () => setTool('lasso');
+document.getElementById('tool-fill').onclick = () => setTool('fill');
+document.getElementById('tool-move').onclick = () => setTool('move');
 
-document.getElementById('tool-bright+').onclick=()=> adjustSelection(20);
-document.getElementById('tool-bright-').onclick=()=> adjustSelection(-20);
+document.getElementById('tool-bright+').onclick = () => adjustSelectionBrightness(20);
+document.getElementById('tool-bright-').onclick = () => adjustSelectionBrightness(-20);
 
-// ====== 色調補正 ======
-function adjustSelection(v){
-  if(!selectionMask) return;
-  for(let y=0;y<size;y++){
-    for(let x=0;x<size;x++){
-      if(selectionMask[y][x] && data[y][x].startsWith('rgba(')){
-        let [r,g,b,a] = data[y][x].replace('rgba(','').replace(')','').split(',').map(Number);
-        r=Math.min(255,Math.max(0,r+v));
-        g=Math.min(255,Math.max(0,g+v));
-        b=Math.min(255,Math.max(0,b+v));
-        data[y][x]=`rgba(${r},${g},${b},${a})`;
+function adjustSelectionBrightness(delta) {
+  if (!selectionMask) return;
+  for (let y = 0; y < canvasHeight; y++) {
+    for (let x = 0; x < canvasWidth; x++) {
+      if (selectionMask[y][x]) {
+        const col = data[y][x];
+        if (col === TRANSPARENT) continue;
+        let { r, g, b, a } = parseRgba(col);
+        r = Math.min(255, Math.max(0, r + delta));
+        g = Math.min(255, Math.max(0, g + delta));
+        b = Math.min(255, Math.max(0, b + delta));
+        data[y][x] = rgbaString(r, g, b, a);
       }
     }
   }
   draw();
 }
 
-// ====== キャンバス リサイズ ======
-document.getElementById('resize-canvas').onclick=()=>{
-  const newSize=parseInt(document.getElementById('canvas-size').value);
-  const newData=createEmpty(newSize);
-  for(let y=0;y<Math.min(size,newSize);y++){
-    for(let x=0;x<Math.min(size,newSize);x++){
-      newData[y][x]=data[y][x];
+// ====== キャンバスリサイズ ======
+const cwInput = document.getElementById('canvas-width');
+const chInput = document.getElementById('canvas-height');
+
+cwInput.value = canvasWidth;
+chInput.value = canvasHeight;
+
+document.getElementById('resize-canvas').onclick = () => {
+  const newW = Math.max(1, Math.min(256, parseInt(cwInput.value, 10) || canvasWidth));
+  const newH = Math.max(1, Math.min(256, parseInt(chInput.value, 10) || canvasHeight));
+  const newData = createEmpty(newW, newH);
+  for (let y = 0; y < Math.min(canvasHeight, newH); y++) {
+    for (let x = 0; x < Math.min(canvasWidth, newW); x++) {
+      newData[y][x] = data[y][x];
     }
   }
-  size=newSize;
-  data=newData;
+  canvasWidth = newW;
+  canvasHeight = newH;
+  data = newData;
+  selectionMask = null;
   draw();
 };
 
-// ====== Fill ======
-function floodFill(x,y){
-  const target=data[y][x];
-  if(target===currentColor) return;
-  const q=[[x,y]];
-  while(q.length){
-    const [cx,cy]=q.pop();
-    if(cx<0||cy<0||cx>=size||cy>=size) continue;
-    if(data[cy][cx]!==target) continue;
-    data[cy][cx]=currentColor;
-    q.push([cx+1,cy],[cx-1,cy],[cx,cy+1],[cx,cy-1]);
+// ====== ズーム ======
+document.getElementById('zoom-in').onclick = () => {
+  scale = Math.min(64, scale + 2);
+  draw();
+};
+
+document.getElementById('zoom-out').onclick = () => {
+  scale = Math.max(2, scale - 2);
+  draw();
+};
+
+// ====== Fill（塗りつぶし） ======
+function floodFill(x, y) {
+  const target = data[y][x];
+  if (target === currentColor) return;
+  const stack = [[x, y]];
+  while (stack.length) {
+    const [cx, cy] = stack.pop();
+    if (cx < 0 || cy < 0 || cx >= canvasWidth || cy >= canvasHeight) continue;
+    if (data[cy][cx] !== target) continue;
+    data[cy][cx] = currentColor;
+    stack.push([cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]);
   }
 }
 
-// ====== 選択ツール（矩形 / 投げ縄） ======
-function commitRectSelection(sx,sy,ex,ey){
-  selectionMask=createEmpty(size).map(row=>row.map(()=>false));
-  for(let y=Math.min(sy,ey);y<=Math.max(sy,ey);y++){
-    for(let x=Math.min(sx,ex);x<=Math.max(sx,ex);x++){
-      if(x>=0&&y>=0&&x<size&&y<size) selectionMask[y][x]=true;
+// ====== 選択ツール ======
+let selStart = null;
+
+function commitRectSelection(sx, sy, ex, ey) {
+  const m = createMask(canvasWidth, canvasHeight, false);
+  const x1 = Math.max(0, Math.min(sx, ex));
+  const x2 = Math.min(canvasWidth - 1, Math.max(sx, ex));
+  const y1 = Math.max(0, Math.min(sy, ey));
+  const y2 = Math.min(canvasHeight - 1, Math.max(sy, ey));
+  for (let y = y1; y <= y2; y++) {
+    for (let x = x1; x <= x2; x++) {
+      m[y][x] = true;
     }
   }
+  selectionMask = m;
 }
 
-function pointInPoly(px,py,pts){
-  let c=false;
-  for(let i=0,j=pts.length-1;i<pts.length;j=i++){
-    const xi=pts[i].x, yi=pts[i].y;
-    const xj=pts[j].x, yj=pts[j].y;
-    const intersect=((yi>py)!=(yj>py)) && px < (xj-xi)*(py-yi)/(yj-yi)+xi;
-    if(intersect) c=!c;
+function pointInPoly(px, py, pts) {
+  let c = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const xi = pts[i].x, yi = pts[i].y;
+    const xj = pts[j].x, yj = pts[j].y;
+    const intersect = ((yi > py) !== (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi);
+    if (intersect) c = !c;
   }
   return c;
 }
 
-function commitLasso(){
-  selectionMask=createEmpty(size).map(row=>row.map(()=>false));
-  for(let y=0;y<size;y++){
-    for(let x=0;x<size;x++){
-      if(pointInPoly(x,y,lassoPoints)) selectionMask[y][x]=true;
+function commitLassoSelection() {
+  if (lassoPoints.length < 3) return;
+  const m = createMask(canvasWidth, canvasHeight, false);
+  for (let y = 0; y < canvasHeight; y++) {
+    for (let x = 0; x < canvasWidth; x++) {
+      if (pointInPoly(x + 0.5, y + 0.5, lassoPoints)) {
+        m[y][x] = true;
+      }
+    }
+  }
+  selectionMask = m;
+}
+
+// ====== 移動ツール ======
+function startMoveSelection(startX, startY) {
+  if (!selectionMask || !selectionMask[startY] || !selectionMask[startY][startX]) return;
+  isDraggingSelection = true;
+  dragStartGrid = { x: startX, y: startY };
+  baseData = cloneData(data);
+  selectionPixels = [];
+  for (let y = 0; y < canvasHeight; y++) {
+    for (let x = 0; x < canvasWidth; x++) {
+      if (selectionMask[y][x]) {
+        selectionPixels.push({ x, y, color: baseData[y][x] });
+        baseData[y][x] = TRANSPARENT;
+      }
     }
   }
 }
 
-// ====== Canvas interaction ======
-let selStart=null;
-
-canvas.addEventListener('mousedown',e=>{
-  const rect=canvas.getBoundingClientRect();
-  const x=Math.floor((e.clientX-rect.left)/scale);
-  const y=Math.floor((e.clientY-rect.top)/scale);
-  if(x<0||y<0||x>=size||y>=size) return;
-
-  if(tool==='pencil'){
-    if(eyedrop){ currentColor=data[y][x]; eyedrop=false; return; }
-    data[y][x]=currentColor;
+function updateMoveSelection(curX, curY) {
+  if (!isDraggingSelection || !selectionPixels) return;
+  const dx = curX - dragStartGrid.x;
+  const dy = curY - dragStartGrid.y;
+  data = cloneData(baseData);
+  const m = createMask(canvasWidth, canvasHeight, false);
+  for (const p of selectionPixels) {
+    const tx = p.x + dx;
+    const ty = p.y + dy;
+    if (tx < 0 || ty < 0 || tx >= canvasWidth || ty >= canvasHeight) continue;
+    data[ty][tx] = p.color;
+    m[ty][tx] = true;
   }
-  else if(tool==='fill'){ floodFill(x,y); }
-  else if(tool==='rectsel'){ selStart={x,y}; selectionMask=null; }
-  else if(tool==='lasso'){ lassoPoints=[{x,y}]; selectionMask=null; }
-  else if(tool==='move'){ selStart={x,y}; isDragging=true; }
+  selectionMask = m;
+}
+
+function endMoveSelection() {
+  isDraggingSelection = false;
+  baseData = null;
+  selectionPixels = null;
+}
+
+// ====== Canvas イベント ======
+canvas.addEventListener('mousedown', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const x = Math.floor((e.clientX - rect.left) / scale);
+  const y = Math.floor((e.clientY - rect.top) / scale);
+  if (x < 0 || y < 0 || x >= canvasWidth || y >= canvasHeight) return;
+  isMouseDown = true;
+
+  if (tool === 'pencil') {
+    if (eyedrop) {
+      const col = data[y][x];
+      currentColor = col;
+      const { r, g, b, a } = parseRgba(col);
+      if (a > 0) {
+        const hsv = rgbToHsv(r, g, b);
+        currentHue = hsv.h;
+        currentSat = hsv.s;
+        currentVal = hsv.v;
+        valueSlider.value = Math.round(currentVal * 100);
+      }
+      currentColorPreview.style.background = col;
+      eyedrop = false;
+      eyedropBtn.style.fontWeight = 'normal';
+      return;
+    }
+    data[y][x] = currentColor;
+  } else if (tool === 'fill') {
+    floodFill(x, y);
+  } else if (tool === 'rectsel') {
+    selStart = { x, y };
+    selectionMask = null;
+  } else if (tool === 'lasso') {
+    lassoPoints = [{ x, y }];
+    selectionMask = null;
+    isLassoDrawing = true;
+  } else if (tool === 'move') {
+    startMoveSelection(x, y);
+  }
 
   draw();
 });
 
-canvas.addEventListener('mousemove',e=>{
-  const rect=canvas.getBoundingClientRect();
-  const x=Math.floor((e.clientX-rect.left)/scale);
-  const y=Math.floor((e.clientY-rect.top)/scale);
-  if(x<0||y<0||x>=size||y>=size) return;
+canvas.addEventListener('mousemove', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const x = Math.floor((e.clientX - rect.left) / scale);
+  const y = Math.floor((e.clientY - rect.top) / scale);
+  if (x < 0 || y < 0 || x >= canvasWidth || y >= canvasHeight) return;
 
-  if(e.buttons===1 && tool==='pencil'){
-    data[y][x]=currentColor;
+  if (tool === 'pencil' && isMouseDown) {
+    data[y][x] = currentColor;
     draw();
   }
-  if(e.buttons===1 && tool==='lasso'){
-    lassoPoints.push({x,y}); draw();
+
+  if (tool === 'lasso' && isMouseDown && isLassoDrawing) {
+    const last = lassoPoints[lassoPoints.length - 1];
+    if (!last || last.x !== x || last.y !== y) {
+      lassoPoints.push({ x, y });
+    }
+  }
+
+  if (tool === 'rectsel' && isMouseDown && selStart) {
+    commitRectSelection(selStart.x, selStart.y, x, y);
+  }
+
+  if (tool === 'move' && isDraggingSelection) {
+    updateMoveSelection(x, y);
+  }
+
+  if (tool === 'rectsel' || tool === 'lasso' || tool === 'move') {
+    draw();
   }
 });
 
-canvas.addEventListener('mouseup',e=>{
-  const rect=canvas.getBoundingClientRect();
-  const x=Math.floor((e.clientX-rect.left)/scale);
-  const y=Math.floor((e.clientY-rect.top)/scale);
-
-  if(tool==='rectsel' && selStart){ commitRectSelection(selStart.x,selStart.y,x,y); }
-  if(tool==='lasso'){ commitLasso(); }
-
-  selStart=null;
-  isDragging=false;
+canvas.addEventListener('mouseup', () => {
+  if (tool === 'lasso' && isLassoDrawing) {
+    commitLassoSelection();
+  }
+  if (tool === 'move' && isDraggingSelection) {
+    endMoveSelection();
+  }
+  isMouseDown = false;
+  isLassoDrawing = false;
+  selStart = null;
   draw();
 });
 
-// ====== Export ======
-document.getElementById('export-png').onclick=()=>{
-  const out=document.createElement('canvas'); out.width=size; out.height=size;
-  const octx=out.getContext('2d');
-  for(let y=0;y<size;y++){
-    for(let x=0;x<size;x++){
-      octx.fillStyle=data[y][x]; octx.fillRect(x,y,1,1);
+canvas.addEventListener('mouseleave', () => {
+  if (tool === 'move' && isDraggingSelection) {
+    endMoveSelection();
+  }
+  isMouseDown = false;
+  isLassoDrawing = false;
+  selStart = null;
+});
+
+// ====== PNG 出力 ======
+document.getElementById('export-png').onclick = () => {
+  const out = document.createElement('canvas');
+  out.width = canvasWidth;
+  out.height = canvasHeight;
+  const octx = out.getContext('2d');
+  for (let y = 0; y < canvasHeight; y++) {
+    for (let x = 0; x < canvasWidth; x++) {
+      const col = data[y][x];
+      if (col === TRANSPARENT) continue;
+      octx.fillStyle = col;
+      octx.fillRect(x, y, 1, 1);
     }
   }
-  const link=document.createElement('a'); link.download='dot.png'; link.href=out.toDataURL(); link.click();
+  const link = document.createElement('a');
+  link.download = 'dot.png';
+  link.href = out.toDataURL('image/png');
+  link.click();
 };
-
 </script>
 </body>
 </html>
